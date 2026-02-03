@@ -129,8 +129,8 @@ function processNetworkRemovalRequests() {
     const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
     const formattedYesterday = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
     
-    // Search for replies to DCM CVI Report emails
-    const threads = GmailApp.search(`subject:"DCM CVI Report" after:${formattedYesterday}`);
+    // Search for replies to both Main and 3K CVI Report emails
+    const threads = GmailApp.search(`(subject:"DCM CVI Report" OR subject:"DCM 3K CVI Report") after:${formattedYesterday}`);
     const removalCommands = [];
     const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
   
@@ -379,6 +379,14 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   body += "REMOVE NETWORK 12345<br/>";
   body += "REMOVE NETWORK 67890<br/>";
   body += "REMOVE NETWORK 99999</small></p>";
+  body += "<hr style='border: 1px solid #ddd; margin: 20px 0;'/>";
+  body += "<p><strong>📋 How to Add a New Network Report:</strong></p>";
+  body += "<ol style='line-height: 1.8;'>";
+  body += "<li><strong>Step 1:</strong> Place this exact string into the AI helper in DCM Reports:<br/><code style='background: #f4f4f4; padding: 2px 6px;'>Advertiser ID, Advertiser, Campaign ID, campaign, Placement ID, Placement, impressions, clicks, Yesterday</code></li>";
+  body += "<li><strong>Step 2:</strong> Set the report subject/label to exactly: <code style='background: #f4f4f4; padding: 2px 6px;'>BKCVI click and impression</code> (this auto-applies the DCM Reports Gmail label)</li>";
+  body += "<li><strong>Step 3:</strong> Set schedule with end date of <strong>Jan 1, 2030</strong></li>";
+  body += "<li><strong>Step 4:</strong> Ensure you CC this email exactly: <code style='background: #f4f4f4; padding: 2px 6px;'>platformsolutionsadopshorizon@gmail.com</code></li>";
+  body += "</ol>";
   body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
     const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
@@ -504,6 +512,14 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
     body += "REMOVE NETWORK 12345<br/>";
     body += "REMOVE NETWORK 67890<br/>";
     body += "REMOVE NETWORK 99999</small></p>";
+    body += "<hr style='border: 1px solid #ddd; margin: 20px 0;'/>";
+    body += "<p><strong>📋 How to Add a New Network Report:</strong></p>";
+    body += "<ol style='line-height: 1.8;'>";
+    body += "<li><strong>Step 1:</strong> Place this exact string into the AI helper in DCM Reports:<br/><code style='background: #f4f4f4; padding: 2px 6px;'>Advertiser ID, Advertiser, Campaign ID, campaign, Placement ID, Placement, impressions, clicks, Yesterday</code></li>";
+    body += "<li><strong>Step 2:</strong> Set the report subject/label to exactly: <code style='background: #f4f4f4; padding: 2px 6px;'>BKCVI click and impression</code> (this auto-applies the DCM Reports Gmail label)</li>";
+    body += "<li><strong>Step 3:</strong> Set schedule with end date of <strong>Jan 1, 2030</strong></li>";
+    body += "<li><strong>Step 4:</strong> Ensure you CC this email exactly: <code style='background: #f4f4f4; padding: 2px 6px;'>platformsolutionsadopshorizon@gmail.com</code></li>";
+    body += "</ol>";
     body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
     const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_3K_CVI_Report_${formattedDate}.csv`);
