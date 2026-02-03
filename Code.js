@@ -343,7 +343,11 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
     body += `<ul>${noDataNetworks.map(n => `<li>${n}</li>`).join("")}</ul>`;
   }
 
-  body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body (e.g., \"REMOVE NETWORK 12345\").</small></p>";
+  body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body.<br/>";
+  body += "Example (for multiple networks):<br/>";
+  body += "REMOVE NETWORK 12345<br/>";
+  body += "REMOVE NETWORK 67890<br/>";
+  body += "REMOVE NETWORK 99999</small></p>";
   body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
     const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
