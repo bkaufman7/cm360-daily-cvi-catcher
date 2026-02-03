@@ -2,10 +2,12 @@
 const CONFIG = {
   GMAIL_LABEL: "DCM Reports",
   CLICK_THRESHOLD: 12500, // $100 in click fees at $0.008 CPC ($100 / $0.008 = 12,500 clicks)
+  CLICK_THRESHOLD_3K: 3000, // 3K threshold for Jenny's report
   ADMIN_EMAIL: "bkaufman@horizonmedia.com",
   SHEETS: {
     DATA: "Data",
     OUTPUT: "Output",
+    OUTPUT_3K: "3K Output",
     NETWORKS: "Networks",
     EMAIL_LIST: "Email List",
     REMOVED_NETWORKS: "Removed Networks"
@@ -31,7 +33,10 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("DCM Reports")
     .addItem("Import DCM Reports", "importDCMReports")
-    .addItem("Send Output Emails", "sendOutputEmails")
+    .addItem("Send Main Report (12.5K)", "sendMainReport")
+    .addItem("Send 3K Report", "send3KReport")
+    .addItem("Send All Reports", "sendAllReports")
+    .addSeparator()
     .addItem("Process Network Removal Requests", "processNetworkRemovalRequests")
     .addToUi();
 }
@@ -270,12 +275,12 @@ function autoAddNewNetworks(ss, allNetworksChecked) {
 
 
 /**
- * Sends formatted email reports to stakeholders
+ * Sends Main Report (12.5K threshold) to Column A recipients
  * @param {Array<Array>} outputData - Filtered placement data to report (optional - reads from Output sheet if not provided)
  * @param {Map<string, number>} validNetworks - Map of network IDs to placement counts (optional)
  * @param {Set<string>} allNetworksChecked - Set of all networks processed (optional)
  */
-function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
+function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   try {
     const sheet = SpreadsheetApp.getActiveSpreadsheet();
     const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT);
@@ -380,9 +385,9 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
     emails.forEach(email => {
       MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
     });
-    logInfo(`Sent daily report to ${emails.length} recipients with ${outputData.length} placements`);
+    logInfo(`Sent Main Report (12.5K) to ${emails.length} recipients with ${outputData.length} placements`);
   } catch (error) {
-    logError("Failed to send output emails", error);
+    logError("Failed to send main report", error);
     // Attempt to notify admin of failure
     try {
       MailApp.sendEmail({
@@ -397,7 +402,147 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
 }
 
 /**
- * Main function: Imports DCM reports, processes data, and sends emails
+ * Sends 3K Report (3,000 click threshold) to Column D recipients
+ * @param {Array<Array>} outputData - Filtered placement data to report (optional - reads from 3K Output sheet if not provided)
+ * @param {Map<string, number>} validNetworks - Map of network IDs to placement counts (optional)
+ * @param {Set<string>} allNetworksChecked - Set of all networks processed (optional)
+ */
+function send3KReport(outputData, validNetworks, allNetworksChecked) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet();
+    const output3KSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT_3K);
+    const emailSheet = sheet.getSheetByName(CONFIG.SHEETS.EMAIL_LIST);
+    const networksSheet = sheet.getSheetByName(CONFIG.SHEETS.NETWORKS);
+
+    // If called from menu without parameters, read data from sheets
+    if (!outputData) {
+      if (output3KSheet && output3KSheet.getLastRow() > 1) {
+        outputData = output3KSheet.getRange(2, 1, output3KSheet.getLastRow() - 1, output3KSheet.getLastColumn()).getValues();
+      } else {
+        outputData = [];
+      }
+    }
+    
+    if (!validNetworks) {
+      validNetworks = new Map();
+      // Build validNetworks from the data in Data sheet
+      const dataSheet = sheet.getSheetByName(CONFIG.SHEETS.DATA);
+      if (dataSheet && dataSheet.getLastRow() > 1) {
+        const dataRows = dataSheet.getRange(2, 1, dataSheet.getLastRow() - 1, 1).getValues();
+        dataRows.forEach(row => {
+          const netId = String(row[0]);
+          validNetworks.set(netId, (validNetworks.get(netId) || 0) + 1);
+        });
+      }
+    }
+    
+    if (!allNetworksChecked) {
+      allNetworksChecked = new Set(validNetworks.keys());
+    }
+
+    const emails = emailSheet.getRange("D2:D").getValues().flat().filter(email => email);
+    if (emails.length === 0) {
+      logError("No 3K report recipients found in Email List Column D");
+      return;
+    }
+
+    const today = new Date();
+    const formattedDate = Utilities.formatDate(today, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.EMAIL);
+    let subject = `DCM 3K CVI Report - ${formattedDate}`;
+    let body = "";
+
+    // 📊 3K CVI Table
+    if (outputData.length > 0) {
+      body += `<p>DAILY DCM 3K CVI Report (placements with 3,000+ clicks and clicks > impressions):</p>`;
+      body += "<table border='1' cellpadding='3' cellspacing='0' style='border-collapse: collapse; font-size: 12px; text-align: left; width: 100%;'>";
+      const headers = ["Network ID", "Advertiser ID", "Advertiser Name", "Campaign ID", "Campaign Name", "Placement ID", "Placement Name", "Impressions", "Clicks", "Difference %"];
+      body += "<tr style='background-color: #f2f2f2; font-weight: bold;'>";
+      headers.forEach(header => body += `<th style='padding: 8px;'>${header}</th>`);
+      body += "</tr>";
+      outputData.forEach(row => {
+        body += "<tr>";
+        row.forEach((cell, index) => {
+          let cellContent = index === 6 && cell.length > 30 ? cell.substring(0, 30) + "..." : cell;
+          body += `<td style='padding: 5px; max-width: 30px;'>${cellContent}</td>`;
+        });
+        body += "</tr>";
+      });
+      body += "</table><br/>";
+    } else {
+      body += "<p>No placements met the 3K threshold criteria yesterday.</p><br/>";
+    }
+
+    // 🧾 Network Summary
+    const crossRef = networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues();
+    let summaryTableRows = [];
+    let noDataNetworks = [];
+
+    crossRef.forEach(([id, name]) => {
+      if (!id || String(id).trim() === "") return;
+      
+      const rowCount = validNetworks.get(String(id));
+      summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
+      
+      if (allNetworksChecked.has(String(id)) && !validNetworks.has(String(id))) {
+        noDataNetworks.push(`${id} - ${name}`);
+      }
+    });
+
+    body += `<p>The following networks were checked:</p>`;
+    body += "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse: collapse; font-size: 10px;'>";
+    body += "<tr style='background-color: #f2f2f2; font-weight: bold;'><th>Network ID</th><th>Network Name</th><th># of Placements Imported</th></tr>";
+    body += summaryTableRows.join("");
+    body += "</table><br/>";
+
+    if (noDataNetworks.length > 0) {
+      body += `<p>⚠️ The following networks had files received but <strong>no valid CSV data</strong> was found:</p>`;
+      body += `<ul>${noDataNetworks.map(n => `<li>${n}</li>`).join("")}</ul>`;
+    }
+
+    body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body.<br/>";
+    body += "Example (for multiple networks):<br/>";
+    body += "REMOVE NETWORK 12345<br/>";
+    body += "REMOVE NETWORK 67890<br/>";
+    body += "REMOVE NETWORK 99999</small></p>";
+    body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
+
+    const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_3K_CVI_Report_${formattedDate}.csv`);
+    emails.forEach(email => {
+      MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
+    });
+    logInfo(`Sent 3K Report to ${emails.length} recipients with ${outputData.length} placements`);
+  } catch (error) {
+    logError("Failed to send 3K report", error);
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "ERROR: DCM 3K CVI Report Failed to Send",
+        body: `An error occurred while sending the 3K CVI report:\n\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send error notification", emailError);
+    }
+  }
+}
+
+/**
+ * Sends both Main (12.5K) and 3K reports - for automation
+ */
+function sendAllReports() {
+  try {
+    logInfo("Sending all reports");
+    sendMainReport();
+    send3KReport();
+    logInfo("All reports sent successfully");
+  } catch (error) {
+    logError("Failed to send all reports", error);
+    throw error;
+  }
+}
+
+/**
+ * Main function: Imports DCM reports and processes data for BOTH outputs
+ * Does NOT send emails - use sendMainReport(), send3KReport(), or sendAllReports() separately
  * Workflow:
  * 1. Process network removal requests
  * 2. Import CSV data from Gmail attachments
@@ -418,6 +563,7 @@ function importDCMReports() {
     
     const dataSheet = sheet.getSheetByName(CONFIG.SHEETS.DATA) || sheet.insertSheet(CONFIG.SHEETS.DATA);
     const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT) || sheet.insertSheet(CONFIG.SHEETS.OUTPUT);
+    const output3KSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT_3K) || sheet.insertSheet(CONFIG.SHEETS.OUTPUT_3K);
     const today = new Date();
     const formattedToday = Utilities.formatDate(today, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
 
@@ -426,8 +572,10 @@ function importDCMReports() {
 
     dataSheet.clearContents(); 
     outputSheet.clearContents();
+    output3KSheet.clearContents();
     dataSheet.getRange(1, 1, 1, dataHeaders.length).setValues([dataHeaders]);
     outputSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+    output3KSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
 
     const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} after:${formattedToday}`);
     let extractedData = [];
@@ -436,7 +584,6 @@ function importDCMReports() {
 
     if (threads.length === 0) {
       logInfo("No emails found with today's reports");
-      sendOutputEmails([], validNetworks, allNetworksChecked);
       return;
     }
 
@@ -495,27 +642,43 @@ function importDCMReports() {
     dataSheet.getRange(2, 1, extractedData.length, dataHeaders.length).setValues(extractedData);
   }
 
-    // Filter placements for CVI violations
-    // Criteria: Clicks >= $100 (12,500 at $0.008 CPC), Clicks > Impressions, No DART Search, Impressions > 0
-    let outputData = extractedData
+    // Filter placements for Main Report (12.5K threshold)
+    // Criteria: Clicks >= 12,500, Clicks > Impressions, No DART Search, Impressions > 0
+    let mainOutputData = extractedData
       .filter(row => parseInt(row[8], 10) >= CONFIG.CLICK_THRESHOLD &&
                      parseInt(row[8], 10) > parseInt(row[7], 10) &&
                      !String(row[4]).toLowerCase().includes("dart search") &&
                      parseInt(row[7], 10) > 0)
       .map(row => {
-    let impressions = parseInt(row[7], 10) || 0;
-    let clicks = parseInt(row[8], 10) || 0;
-    let diffPercentage = impressions === 0 ? "Infinity%" : ((clicks - impressions) / impressions * 100).toFixed(2) + "%";
-    return [...row, diffPercentage];
-  });
+        let impressions = parseInt(row[7], 10) || 0;
+        let clicks = parseInt(row[8], 10) || 0;
+        let diffPercentage = impressions === 0 ? "Infinity%" : ((clicks - impressions) / impressions * 100).toFixed(2) + "%";
+        return [...row, diffPercentage];
+      });
 
+    // Filter placements for 3K Report
+    // Criteria: Clicks >= 3,000, Clicks > Impressions, No DART Search, Impressions >= 0
+    let output3KData = extractedData
+      .filter(row => parseInt(row[8], 10) >= CONFIG.CLICK_THRESHOLD_3K &&
+                     parseInt(row[8], 10) > parseInt(row[7], 10) &&
+                     !String(row[4]).toLowerCase().includes("dart search") &&
+                     parseInt(row[7], 10) >= 0)
+      .map(row => {
+        let impressions = parseInt(row[7], 10) || 0;
+        let clicks = parseInt(row[8], 10) || 0;
+        let diffPercentage = impressions === 0 ? "Infinity%" : ((clicks - impressions) / impressions * 100).toFixed(2) + "%";
+        return [...row, diffPercentage];
+      });
 
-    if (outputData.length > 0) {
-      outputSheet.getRange(2, 1, outputData.length, outputHeaders.length).setValues(outputData);
+    if (mainOutputData.length > 0) {
+      outputSheet.getRange(2, 1, mainOutputData.length, outputHeaders.length).setValues(mainOutputData);
     }
 
-    sendOutputEmails(outputData, validNetworks, allNetworksChecked);
-    logInfo(`Import completed: ${extractedData.length} total rows, ${outputData.length} flagged placements`);
+    if (output3KData.length > 0) {
+      output3KSheet.getRange(2, 1, output3KData.length, outputHeaders.length).setValues(output3KData);
+    }
+
+    logInfo(`Import completed: ${extractedData.length} total rows, ${mainOutputData.length} main placements, ${output3KData.length} 3K placements`);
   } catch (error) {
     logError("Fatal error in importDCMReports", error);
     // Notify admin of catastrophic failure
