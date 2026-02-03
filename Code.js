@@ -1,3 +1,32 @@
+// Configuration Constants
+const CONFIG = {
+  GMAIL_LABEL: "DCM Reports",
+  CLICK_THRESHOLD: 12500, // $100 in click fees at $0.008 CPC ($100 / $0.008 = 12,500 clicks)
+  ADMIN_EMAIL: "bkaufman@horizonmedia.com",
+  SHEETS: {
+    DATA: "Data",
+    OUTPUT: "Output",
+    NETWORKS: "Networks",
+    EMAIL_LIST: "Email List",
+    REMOVED_NETWORKS: "Removed Networks"
+  },
+  DATE_FORMAT: {
+    EMAIL: "MM.dd.yy",
+    SEARCH: "yyyy/MM/dd",
+    AUDIT: "MM/dd/yyyy HH:mm:ss"
+  }
+};
+
+// Logging Utilities
+function logInfo(message) {
+  Logger.log(`[INFO] ${new Date().toISOString()}: ${message}`);
+}
+
+function logError(message, error) {
+  Logger.log(`[ERROR] ${new Date().toISOString()}: ${message}`);
+  if (error) Logger.log(error);
+}
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("DCM Reports")
@@ -7,12 +36,27 @@ function onOpen() {
     .addToUi();
 }
 
+/**
+ * Extracts network ID from filename (format: NETWORKID_...)
+ * @param {string} fileName - The name of the CSV file
+ * @returns {string} Network ID or "Unknown" if not found
+ */
 function extractNetworkId(fileName) {
   const match = fileName.match(/^([^_]+)_/);
-  return match ? String(match[1]) : "Unknown";
+  const id = match ? String(match[1]).trim() : "Unknown";
+  if (id === "Unknown") {
+    logError(`Could not extract network ID from filename: ${fileName}`);
+  }
+  return id;
 }
 
 
+/**
+ * Processes CSV content and extracts placement data
+ * @param {string} fileContent - Raw CSV file content
+ * @param {string} networkId - Network identifier to prepend to each row
+ * @returns {Array<Array>} Parsed rows with network ID prepended
+ */
 function processCSV(fileContent, networkId) {
   let lines = fileContent.split("\n").map(line => line.trim()).filter(line => line);
   let startIndex = lines.findIndex(line => line.startsWith("Advertiser ID"));
@@ -21,23 +65,6 @@ function processCSV(fileContent, networkId) {
   let csvData = Utilities.parseCsv(lines.slice(startIndex).join("\n"));
   csvData.shift(); // Remove headers
   return csvData.map(row => [networkId, ...row]);
-}
-
-function getAdvertisersFromRawData(ss) {
-  const advertiserSet = new Set();
-  const raw = ss.getSheetByName("Raw Data");
-
-  if (raw) {
-    const data = raw.getDataRange().getValues();
-    const m = getHeaderMap(data[0]);
-
-    data.slice(1).forEach(r => {
-      const adv = r[m["Advertiser"]];
-      if (adv) advertiserSet.add(adv.toString().trim().toLowerCase());
-    });
-  }
-
-  return advertiserSet;
 }
 
 function getRemovedNetworks(ss) {
@@ -54,32 +81,53 @@ function getRemovedNetworks(ss) {
   return removedNetworks;
 }
 
+/**
+ * Ensures the Removed Networks audit sheet exists
+ * @param {SpreadsheetApp.Spreadsheet} ss - The active spreadsheet
+ * @returns {SpreadsheetApp.Sheet} The Removed Networks sheet
+ */
 function ensureRemovedNetworksSheet(ss) {
-  let removedSheet = ss.getSheetByName("Removed Networks");
-  
-  if (!removedSheet) {
-    removedSheet = ss.insertSheet("Removed Networks");
-    const headers = ["Network ID", "Network Name", "Removed By", "Date Removed"];
-    removedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    removedSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+  try {
+    let removedSheet = ss.getSheetByName(CONFIG.SHEETS.REMOVED_NETWORKS);
+    
+    if (!removedSheet) {
+      removedSheet = ss.insertSheet(CONFIG.SHEETS.REMOVED_NETWORKS);
+      const headers = ["Network ID", "Network Name", "Removed By", "Date Removed"];
+      removedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      removedSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+      logInfo(`Created ${CONFIG.SHEETS.REMOVED_NETWORKS} sheet`);
+    }
+    
+    return removedSheet;
+  } catch (error) {
+    logError("Failed to create Removed Networks sheet", error);
+    throw error;
   }
-  
-  return removedSheet;
 }
 
+/**
+ * Processes network removal requests from email replies
+ * @returns {Array<Object>} Array of successfully removed networks
+ */
 function processNetworkRemovalRequests() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const networksSheet = ss.getSheetByName("Networks");
-  const removedSheet = ensureRemovedNetworksSheet(ss);
-  
-  const today = new Date();
-  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
-  const formattedYesterday = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), "yyyy/MM/dd");
-  
-  // Search for replies to DCM CVI Report emails
-  const threads = GmailApp.search(`subject:"DCM CVI Report" after:${formattedYesterday}`);
-  const removalCommands = [];
-  const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const networksSheet = ss.getSheetByName(CONFIG.SHEETS.NETWORKS);
+    const removedSheet = ensureRemovedNetworksSheet(ss);
+    
+    if (!networksSheet) {
+      logError("Networks sheet not found");
+      return [];
+    }
+    
+    const today = new Date();
+    const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+    const formattedYesterday = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
+    
+    // Search for replies to DCM CVI Report emails
+    const threads = GmailApp.search(`subject:"DCM CVI Report" after:${formattedYesterday}`);
+    const removalCommands = [];
+    const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
   
   threads.forEach(thread => {
     thread.getMessages().forEach(message => {
@@ -159,18 +207,42 @@ function processNetworkRemovalRequests() {
     confirmBody += "</table>";
     
     MailApp.sendEmail({
-      to: "bkaufman@horizonmedia.com",
+      to: CONFIG.ADMIN_EMAIL,
       subject: "DCM Networks Removed - Confirmation",
       htmlBody: confirmBody
     });
+    logInfo(`Sent removal confirmation for ${successfulRemovals.length} networks`);
   }
   
   return successfulRemovals;
+  } catch (error) {
+    logError("Failed to process network removal requests", error);
+    // Send error notification to admin
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "ERROR: DCM Network Removal Failed",
+        body: `An error occurred while processing network removal requests:\n\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send error notification email", emailError);
+    }
+    return [];
+  }
 }
 
+/**
+ * Automatically adds newly discovered networks to the Networks sheet
+ * @param {SpreadsheetApp.Spreadsheet} ss - The active spreadsheet
+ * @param {Set<string>} allNetworksChecked - Set of all network IDs found in reports
+ */
 function autoAddNewNetworks(ss, allNetworksChecked) {
-  const networksSheet = ss.getSheetByName("Networks");
-  if (!networksSheet) return;
+  try {
+    const networksSheet = ss.getSheetByName(CONFIG.SHEETS.NETWORKS);
+    if (!networksSheet) {
+      logError("Networks sheet not found");
+      return;
+    }
   
   const existingNetworks = new Set();
   const data = networksSheet.getDataRange().getValues();
@@ -186,25 +258,39 @@ function autoAddNewNetworks(ss, allNetworksChecked) {
     }
   });
   
-  if (newNetworks.length > 0) {
-    networksSheet.getRange(networksSheet.getLastRow() + 1, 1, newNetworks.length, 2).setValues(newNetworks);
+    if (newNetworks.length > 0) {
+      networksSheet.getRange(networksSheet.getLastRow() + 1, 1, newNetworks.length, 2).setValues(newNetworks);
+      logInfo(`Auto-added ${newNetworks.length} new networks`);
+    }
+  } catch (error) {
+    logError("Failed to auto-add new networks", error);
   }
 }
 
 
 
+/**
+ * Sends formatted email reports to stakeholders
+ * @param {Array<Array>} outputData - Filtered placement data to report
+ * @param {Map<string, number>} validNetworks - Map of network IDs to placement counts
+ * @param {Set<string>} allNetworksChecked - Set of all networks processed
+ */
 function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet();
-  const outputSheet = sheet.getSheetByName("Output");
-  const emailSheet = sheet.getSheetByName("Email List");
-  const networksSheet = sheet.getSheetByName("Networks");
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet();
+    const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT);
+    const emailSheet = sheet.getSheetByName(CONFIG.SHEETS.EMAIL_LIST);
+    const networksSheet = sheet.getSheetByName(CONFIG.SHEETS.NETWORKS);
 
-  const emails = emailSheet.getRange("A2:A").getValues().flat().filter(email => email);
-  if (emails.length === 0) return;
+    const emails = emailSheet.getRange("A2:A").getValues().flat().filter(email => email);
+    if (emails.length === 0) {
+      logError("No email recipients found in Email List sheet");
+      return;
+    }
 
-  const today = new Date();
-  const formattedDate = Utilities.formatDate(today, Session.getScriptTimeZone(), "MM.dd.yy");
-  let subject = `DCM CVI Report - ${formattedDate}`;
+    const today = new Date();
+    const formattedDate = Utilities.formatDate(today, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.EMAIL);
+    let subject = `DCM CVI Report - ${formattedDate}`;
   let body = "";
 
   // 📊 Main CVI Table
@@ -257,45 +343,69 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
   body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body (e.g., \"REMOVE NETWORK 12345\").</small></p>";
   body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
-  const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
-  emails.forEach(email => {
-    MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
-  });
+    const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
+    emails.forEach(email => {
+      MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
+    });
+    logInfo(`Sent daily report to ${emails.length} recipients with ${outputData.length} placements`);
+  } catch (error) {
+    logError("Failed to send output emails", error);
+    // Attempt to notify admin of failure
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "ERROR: DCM CVI Report Failed to Send",
+        body: `An error occurred while sending the daily CVI report:\n\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send error notification", emailError);
+    }
+  }
 }
 
+/**
+ * Main function: Imports DCM reports, processes data, and sends emails
+ * Workflow:
+ * 1. Process network removal requests
+ * 2. Import CSV data from Gmail attachments
+ * 3. Filter for CVI violations (clicks >= $100, clicks > impressions)
+ * 4. Auto-add new networks
+ * 5. Send email reports
+ */
 function importDCMReports() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet();
-  
-  // Process network removal requests FIRST (before importing data)
-  processNetworkRemovalRequests();
-  
-  // Get list of removed networks to filter out
-  const removedNetworks = getRemovedNetworks(sheet);
-  
-  const dataSheet = sheet.getSheetByName("Data") || sheet.insertSheet("Data");
-  const outputSheet = sheet.getSheetByName("Output") || sheet.insertSheet("Output");
-  const label = "DCM Reports";
-  const today = new Date();
-  const formattedToday = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM/dd");
+  try {
+    logInfo("Starting DCM report import");
+    const sheet = SpreadsheetApp.getActiveSpreadsheet();
+    
+    // Process network removal requests FIRST (before importing data)
+    processNetworkRemovalRequests();
+    
+    // Get list of removed networks to filter out
+    const removedNetworks = getRemovedNetworks(sheet);
+    
+    const dataSheet = sheet.getSheetByName(CONFIG.SHEETS.DATA) || sheet.insertSheet(CONFIG.SHEETS.DATA);
+    const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT) || sheet.insertSheet(CONFIG.SHEETS.OUTPUT);
+    const today = new Date();
+    const formattedToday = Utilities.formatDate(today, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
 
   const dataHeaders = ["Network ID", "Advertiser ID", "Advertiser", "Campaign ID", "Campaign", "Placement ID", "Placement", "Impressions", "Clicks"];
   const outputHeaders = [...dataHeaders, "Difference %"];
 
-  dataSheet.clearContents(); 
-  outputSheet.clearContents();
-  dataSheet.getRange(1, 1, 1, dataHeaders.length).setValues([dataHeaders]);
-  outputSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+    dataSheet.clearContents(); 
+    outputSheet.clearContents();
+    dataSheet.getRange(1, 1, 1, dataHeaders.length).setValues([dataHeaders]);
+    outputSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
 
-  const threads = GmailApp.search(`label:${label} after:${formattedToday}`);
-  let extractedData = [];
-  let allNetworksChecked = new Set();
-  let validNetworks = new Map(); // Map<networkId, numberOfPlacements>
+    const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} after:${formattedToday}`);
+    let extractedData = [];
+    let allNetworksChecked = new Set();
+    let validNetworks = new Map(); // Map<networkId, numberOfPlacements>
 
-  if (threads.length === 0) {
-    Logger.log("⚠️ No emails found with today's reports.");
-    sendOutputEmails([], validNetworks, allNetworksChecked);
-    return;
-  }
+    if (threads.length === 0) {
+      logInfo("No emails found with today's reports");
+      sendOutputEmails([], validNetworks, allNetworksChecked);
+      return;
+    }
 
   threads.forEach(thread => {
     thread.getMessages().forEach(message => {
@@ -352,14 +462,14 @@ function importDCMReports() {
     dataSheet.getRange(2, 1, extractedData.length, dataHeaders.length).setValues(extractedData);
   }
 
-  // Load ignored advertisers from "Advertisers to ignore" tab
-
-let outputData = extractedData
-  .filter(row => parseInt(row[8], 10) >= 12500 &&
-                 parseInt(row[8], 10) > parseInt(row[7], 10) &&
-                 !String(row[4]).toLowerCase().includes("dart search") &&
-                 parseInt(row[7], 10) > 0)
-  .map(row => {
+    // Filter placements for CVI violations
+    // Criteria: Clicks >= $100 (12,500 at $0.008 CPC), Clicks > Impressions, No DART Search, Impressions > 0
+    let outputData = extractedData
+      .filter(row => parseInt(row[8], 10) >= CONFIG.CLICK_THRESHOLD &&
+                     parseInt(row[8], 10) > parseInt(row[7], 10) &&
+                     !String(row[4]).toLowerCase().includes("dart search") &&
+                     parseInt(row[7], 10) > 0)
+      .map(row => {
     let impressions = parseInt(row[7], 10) || 0;
     let clicks = parseInt(row[8], 10) || 0;
     let diffPercentage = impressions === 0 ? "Infinity%" : ((clicks - impressions) / impressions * 100).toFixed(2) + "%";
@@ -367,9 +477,24 @@ let outputData = extractedData
   });
 
 
-  if (outputData.length > 0) {
-    outputSheet.getRange(2, 1, outputData.length, outputHeaders.length).setValues(outputData);
-  }
+    if (outputData.length > 0) {
+      outputSheet.getRange(2, 1, outputData.length, outputHeaders.length).setValues(outputData);
+    }
 
-  sendOutputEmails(outputData, validNetworks, allNetworksChecked);
+    sendOutputEmails(outputData, validNetworks, allNetworksChecked);
+    logInfo(`Import completed: ${extractedData.length} total rows, ${outputData.length} flagged placements`);
+  } catch (error) {
+    logError("Fatal error in importDCMReports", error);
+    // Notify admin of catastrophic failure
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "CRITICAL ERROR: DCM Report Import Failed",
+        body: `A critical error occurred during the DCM report import process:\n\n${error}\n\nStack trace:\n${error.stack || 'N/A'}`
+      });
+    } catch (emailError) {
+      logError("Failed to send critical error notification", emailError);
+    }
+    throw error; // Re-throw to ensure Apps Script logs the failure
+  }
 }
