@@ -3,6 +3,7 @@ function onOpen() {
   ui.createMenu("DCM Reports")
     .addItem("Import DCM Reports", "importDCMReports")
     .addItem("Send Output Emails", "sendOutputEmails")
+    .addItem("Process Network Removal Requests", "processNetworkRemovalRequests")
     .addToUi();
 }
 
@@ -37,6 +38,157 @@ function getAdvertisersFromRawData(ss) {
   }
 
   return advertiserSet;
+}
+
+function getRemovedNetworks(ss) {
+  const removedSheet = ss.getSheetByName("Removed Networks");
+  const removedNetworks = new Set();
+  
+  if (removedSheet && removedSheet.getLastRow() > 1) {
+    const data = removedSheet.getRange(2, 1, removedSheet.getLastRow() - 1, 1).getValues();
+    data.forEach(row => {
+      if (row[0]) removedNetworks.add(String(row[0]).trim());
+    });
+  }
+  
+  return removedNetworks;
+}
+
+function ensureRemovedNetworksSheet(ss) {
+  let removedSheet = ss.getSheetByName("Removed Networks");
+  
+  if (!removedSheet) {
+    removedSheet = ss.insertSheet("Removed Networks");
+    const headers = ["Network ID", "Network Name", "Removed By", "Date Removed"];
+    removedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    removedSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+  }
+  
+  return removedSheet;
+}
+
+function processNetworkRemovalRequests() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const networksSheet = ss.getSheetByName("Networks");
+  const removedSheet = ensureRemovedNetworksSheet(ss);
+  
+  const today = new Date();
+  const yesterday = new Date(today.getTime() - 24 * 60 * 60 * 1000);
+  const formattedYesterday = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), "yyyy/MM/dd");
+  
+  // Search for replies to DCM CVI Report emails
+  const threads = GmailApp.search(`subject:"DCM CVI Report" after:${formattedYesterday}`);
+  const removalCommands = [];
+  const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
+  
+  threads.forEach(thread => {
+    thread.getMessages().forEach(message => {
+      const body = message.getPlainBody();
+      const from = message.getFrom();
+      let match;
+      
+      while ((match = regex.exec(body)) !== null) {
+        const networkId = match[1];
+        removalCommands.push({
+          networkId: networkId,
+          from: from,
+          date: message.getDate()
+        });
+      }
+    });
+  });
+  
+  if (removalCommands.length === 0) {
+    Logger.log("No removal requests found.");
+    return [];
+  }
+  
+  // Deduplicate by network ID (keep latest request)
+  const uniqueRemovals = new Map();
+  removalCommands.forEach(cmd => {
+    if (!uniqueRemovals.has(cmd.networkId) || uniqueRemovals.get(cmd.networkId).date < cmd.date) {
+      uniqueRemovals.set(cmd.networkId, cmd);
+    }
+  });
+  
+  // Get existing removed networks to avoid duplicates
+  const alreadyRemoved = getRemovedNetworks(ss);
+  const successfulRemovals = [];
+  
+  uniqueRemovals.forEach((cmd, networkId) => {
+    if (alreadyRemoved.has(networkId)) {
+      Logger.log(`Network ${networkId} already removed. Skipping.`);
+      return;
+    }
+    
+    // Find network in Networks sheet
+    const networksData = networksSheet.getDataRange().getValues();
+    let networkName = "Unknown";
+    let rowToDelete = -1;
+    
+    for (let i = 1; i < networksData.length; i++) {
+      if (String(networksData[i][0]).trim() === networkId) {
+        networkName = networksData[i][1] || "Unknown";
+        rowToDelete = i + 1;
+        break;
+      }
+    }
+    
+    // Add to Removed Networks sheet
+    const newRow = [networkId, networkName, cmd.from, Utilities.formatDate(cmd.date, Session.getScriptTimeZone(), "MM/dd/yyyy HH:mm:ss")];
+    removedSheet.appendRow(newRow);
+    
+    // Delete from Networks sheet if found
+    if (rowToDelete > 0) {
+      networksSheet.deleteRow(rowToDelete);
+    }
+    
+    successfulRemovals.push({ networkId, networkName, from: cmd.from });
+  });
+  
+  // Send confirmation email to bkaufman@horizonmedia.com
+  if (successfulRemovals.length > 0) {
+    let confirmBody = "<p>The following networks were removed from the DCM CVI monitoring:</p>";
+    confirmBody += "<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse;'>";
+    confirmBody += "<tr style='background-color: #f2f2f2; font-weight: bold;'><th>Network ID</th><th>Network Name</th><th>Requested By</th></tr>";
+    
+    successfulRemovals.forEach(removal => {
+      confirmBody += `<tr><td>${removal.networkId}</td><td>${removal.networkName}</td><td>${removal.from}</td></tr>`;
+    });
+    
+    confirmBody += "</table>";
+    
+    MailApp.sendEmail({
+      to: "bkaufman@horizonmedia.com",
+      subject: "DCM Networks Removed - Confirmation",
+      htmlBody: confirmBody
+    });
+  }
+  
+  return successfulRemovals;
+}
+
+function autoAddNewNetworks(ss, allNetworksChecked) {
+  const networksSheet = ss.getSheetByName("Networks");
+  if (!networksSheet) return;
+  
+  const existingNetworks = new Set();
+  const data = networksSheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0]) existingNetworks.add(String(data[i][0]).trim());
+  }
+  
+  const newNetworks = [];
+  allNetworksChecked.forEach(networkId => {
+    if (!existingNetworks.has(networkId) && networkId !== "Unknown") {
+      newNetworks.push([networkId, "TO BE ADDED SOON"]);
+    }
+  });
+  
+  if (newNetworks.length > 0) {
+    networksSheet.getRange(networksSheet.getLastRow() + 1, 1, newNetworks.length, 2).setValues(newNetworks);
+  }
 }
 
 
@@ -83,9 +235,9 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
 
   crossRef.forEach(([id, name]) => {
     const rowCount = validNetworks.get(String(id));
-    if (validNetworks.has(String(id))) {
-      summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
-    }
+    // Show all networks in the Networks sheet, with 0 if no data
+    summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
+    
     if (allNetworksChecked.has(String(id)) && !validNetworks.has(String(id))) {
       noDataNetworks.push(`${id} - ${name}`);
     }
@@ -102,6 +254,7 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
     body += `<ul>${noDataNetworks.map(n => `<li>${n}</li>`).join("")}</ul>`;
   }
 
+  body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body (e.g., \"REMOVE NETWORK 12345\").</small></p>";
   body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
   const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
@@ -112,6 +265,13 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
 
 function importDCMReports() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // Process network removal requests FIRST (before importing data)
+  processNetworkRemovalRequests();
+  
+  // Get list of removed networks to filter out
+  const removedNetworks = getRemovedNetworks(sheet);
+  
   const dataSheet = sheet.getSheetByName("Data") || sheet.insertSheet("Data");
   const outputSheet = sheet.getSheetByName("Output") || sheet.insertSheet("Output");
   const label = "DCM Reports";
@@ -143,6 +303,13 @@ function importDCMReports() {
       attachments.forEach(attachment => {
         const name = attachment.getName();
         const networkId = extractNetworkId(name);
+        
+        // Skip if network is in the removed list
+        if (removedNetworks.has(networkId)) {
+          Logger.log(`Skipping removed network: ${networkId}`);
+          return;
+        }
+        
         allNetworksChecked.add(networkId);
 
         if (attachment.getContentType() === "text/csv" || name.endsWith(".csv")) {
@@ -156,6 +323,13 @@ function importDCMReports() {
           const unzippedFiles = Utilities.unzip(attachment.copyBlob());
           unzippedFiles.forEach(file => {
             const nestedId = extractNetworkId(file.getName());
+            
+            // Skip if network is in the removed list
+            if (removedNetworks.has(nestedId)) {
+              Logger.log(`Skipping removed network: ${nestedId}`);
+              return;
+            }
+            
             allNetworksChecked.add(nestedId);
             if (file.getContentType() === "text/csv" || file.getName().endsWith(".csv")) {
               const rawRows = processCSV(file.getDataAsString(), nestedId);
@@ -170,6 +344,9 @@ function importDCMReports() {
       });
     });
   });
+  
+  // Auto-add any new networks discovered
+  autoAddNewNetworks(sheet, allNetworksChecked);
 
   if (extractedData.length > 0) {
     dataSheet.getRange(2, 1, extractedData.length, dataHeaders.length).setValues(extractedData);
