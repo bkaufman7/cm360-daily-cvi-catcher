@@ -320,6 +320,9 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
   let noDataNetworks = [];
 
   crossRef.forEach(([id, name]) => {
+    // Skip empty rows
+    if (!id || String(id).trim() === "") return;
+    
     const rowCount = validNetworks.get(String(id));
     // Show all networks in the Networks sheet, with 0 if no data
     summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
