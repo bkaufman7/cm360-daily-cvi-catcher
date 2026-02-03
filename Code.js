@@ -570,12 +570,27 @@ function importDCMReports() {
   const dataHeaders = ["Network ID", "Advertiser ID", "Advertiser", "Campaign ID", "Campaign", "Placement ID", "Placement", "Impressions", "Clicks"];
   const outputHeaders = [...dataHeaders, "Difference %"];
 
-    dataSheet.clearContents(); 
-    outputSheet.clearContents();
-    output3KSheet.clearContents();
-    dataSheet.getRange(1, 1, 1, dataHeaders.length).setValues([dataHeaders]);
-    outputSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
-    output3KSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+    // Clear only data rows (keep headers), more efficient than clearContents()
+    if (dataSheet.getLastRow() > 1) {
+      dataSheet.deleteRows(2, dataSheet.getLastRow() - 1);
+    }
+    if (outputSheet.getLastRow() > 1) {
+      outputSheet.deleteRows(2, outputSheet.getLastRow() - 1);
+    }
+    if (output3KSheet.getLastRow() > 1) {
+      output3KSheet.deleteRows(2, output3KSheet.getLastRow() - 1);
+    }
+    
+    // Set headers if sheets are empty
+    if (dataSheet.getLastRow() === 0) {
+      dataSheet.getRange(1, 1, 1, dataHeaders.length).setValues([dataHeaders]);
+    }
+    if (outputSheet.getLastRow() === 0) {
+      outputSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+    }
+    if (output3KSheet.getLastRow() === 0) {
+      output3KSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+    }
 
     const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} after:${formattedToday}`);
     let extractedData = [];
