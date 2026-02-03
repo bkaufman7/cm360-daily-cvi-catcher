@@ -271,9 +271,9 @@ function autoAddNewNetworks(ss, allNetworksChecked) {
 
 /**
  * Sends formatted email reports to stakeholders
- * @param {Array<Array>} outputData - Filtered placement data to report
- * @param {Map<string, number>} validNetworks - Map of network IDs to placement counts
- * @param {Set<string>} allNetworksChecked - Set of all networks processed
+ * @param {Array<Array>} outputData - Filtered placement data to report (optional - reads from Output sheet if not provided)
+ * @param {Map<string, number>} validNetworks - Map of network IDs to placement counts (optional)
+ * @param {Set<string>} allNetworksChecked - Set of all networks processed (optional)
  */
 function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
   try {
@@ -281,6 +281,32 @@ function sendOutputEmails(outputData, validNetworks, allNetworksChecked) {
     const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT);
     const emailSheet = sheet.getSheetByName(CONFIG.SHEETS.EMAIL_LIST);
     const networksSheet = sheet.getSheetByName(CONFIG.SHEETS.NETWORKS);
+
+    // If called from menu without parameters, read data from sheets
+    if (!outputData) {
+      if (outputSheet.getLastRow() > 1) {
+        outputData = outputSheet.getRange(2, 1, outputSheet.getLastRow() - 1, outputSheet.getLastColumn()).getValues();
+      } else {
+        outputData = [];
+      }
+    }
+    
+    if (!validNetworks) {
+      validNetworks = new Map();
+      // Build validNetworks from the data in Data sheet
+      const dataSheet = sheet.getSheetByName(CONFIG.SHEETS.DATA);
+      if (dataSheet && dataSheet.getLastRow() > 1) {
+        const dataRows = dataSheet.getRange(2, 1, dataSheet.getLastRow() - 1, 1).getValues();
+        dataRows.forEach(row => {
+          const netId = String(row[0]);
+          validNetworks.set(netId, (validNetworks.get(netId) || 0) + 1);
+        });
+      }
+    }
+    
+    if (!allNetworksChecked) {
+      allNetworksChecked = new Set(validNetworks.keys());
+    }
 
     const emails = emailSheet.getRange("A2:A").getValues().flat().filter(email => email);
     if (emails.length === 0) {
