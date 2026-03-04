@@ -38,6 +38,7 @@ function onOpen() {
     .addItem("Send All Reports", "sendAllReports")
     .addSeparator()
     .addItem("Process Network Removal Requests", "processNetworkRemovalRequests")
+    .addItem("Backfill Source Email Links", "backfillSourceEmailLinks")
     .addToUi();
 }
 
@@ -97,7 +98,7 @@ function ensureRemovedNetworksSheet(ss) {
     
     if (!removedSheet) {
       removedSheet = ss.insertSheet(CONFIG.SHEETS.REMOVED_NETWORKS);
-      const headers = ["Network ID", "Network Name", "Removed By", "Date Removed"];
+      const headers = ["Network ID", "Network Name", "Removed By", "Date Removed", "Source Email"];
       removedSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
       removedSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
       logInfo(`Created ${CONFIG.SHEETS.REMOVED_NETWORKS} sheet`);
@@ -133,19 +134,29 @@ function processNetworkRemovalRequests() {
     const threads = GmailApp.search(`(subject:"DCM CVI Report" OR subject:"DCM 3K CVI Report") after:${formattedYesterday}`);
     const removalCommands = [];
     const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
+    const exampleNetworkIds = new Set(["12345", "67890", "99999"]); // Skip example IDs from email instructions
   
   threads.forEach(thread => {
     thread.getMessages().forEach(message => {
       const body = message.getPlainBody();
       const from = message.getFrom();
+      const messageId = message.getId();
       let match;
       
       while ((match = regex.exec(body)) !== null) {
         const networkId = match[1];
+        
+        // Skip example network IDs used in email instructions
+        if (exampleNetworkIds.has(networkId)) {
+          Logger.log(`Skipping example network ID: ${networkId}`);
+          continue;
+        }
+        
         removalCommands.push({
           networkId: networkId,
           from: from,
-          date: message.getDate()
+          date: message.getDate(),
+          messageId: messageId
         });
       }
     });
@@ -187,8 +198,9 @@ function processNetworkRemovalRequests() {
       }
     }
     
-    // Add to Removed Networks sheet
-    const newRow = [networkId, networkName, cmd.from, Utilities.formatDate(cmd.date, Session.getScriptTimeZone(), "MM/dd/yyyy HH:mm:ss")];
+    // Add to Removed Networks sheet with Gmail source link
+    const gmailLink = `https://mail.google.com/mail/u/0/#all/${cmd.messageId}`;
+    const newRow = [networkId, networkName, cmd.from, Utilities.formatDate(cmd.date, Session.getScriptTimeZone(), "MM/dd/yyyy HH:mm:ss"), gmailLink];
     removedSheet.appendRow(newRow);
     
     // Delete from Networks sheet if found
@@ -233,6 +245,91 @@ function processNetworkRemovalRequests() {
       logError("Failed to send error notification email", emailError);
     }
     return [];
+  }
+}
+
+/**
+ * Backfills missing Source Email links in the Removed Networks sheet
+ * Searches Gmail for the original removal request emails and adds links to column E
+ */
+function backfillSourceEmailLinks() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const removedSheet = ss.getSheetByName(CONFIG.SHEETS.REMOVED_NETWORKS);
+    
+    if (!removedSheet || removedSheet.getLastRow() < 2) {
+      logInfo("No removed networks to backfill");
+      return 0;
+    }
+    
+    const lastRow = removedSheet.getLastRow();
+    const data = removedSheet.getRange(2, 1, lastRow - 1, 5).getValues(); // Get all columns A-E
+    let updatedCount = 0;
+    const exampleNetworkIds = new Set(["12345", "67890", "99999"]);
+    
+    for (let i = 0; i < data.length; i++) {
+      const networkId = String(data[i][0]).trim();
+      const sourceEmail = data[i][4]; // Column E (index 4)
+      
+      // Skip if already has a link or is an example ID
+      if (sourceEmail || !networkId || exampleNetworkIds.has(networkId)) {
+        continue;
+      }
+      
+      // Search Gmail for this network ID removal request
+      try {
+        const threads = GmailApp.search(`(subject:"DCM CVI Report" OR subject:"DCM 3K CVI Report") "REMOVE NETWORK ${networkId}"`);
+        
+        if (threads.length > 0) {
+          // Find the message with the removal command
+          let foundMessageId = null;
+          const regex = new RegExp(`REMOVE\\s+NETWORK\\s+${networkId}`, "i");
+          
+          for (let thread of threads) {
+            const messages = thread.getMessages();
+            for (let message of messages) {
+              if (regex.test(message.getPlainBody())) {
+                foundMessageId = message.getId();
+                break;
+              }
+            }
+            if (foundMessageId) break;
+          }
+          
+          if (foundMessageId) {
+            const gmailLink = `https://mail.google.com/mail/u/0/#all/${foundMessageId}`;
+            removedSheet.getRange(i + 2, 5).setValue(gmailLink); // Row i+2, Column E
+            updatedCount++;
+            logInfo(`Added source email link for network ${networkId}`);
+          } else {
+            logInfo(`Could not find removal message for network ${networkId}`);
+          }
+        }
+      } catch (searchError) {
+        logError(`Failed to search for network ${networkId}`, searchError);
+      }
+      
+      // Add a small delay to avoid quota issues
+      if (updatedCount > 0 && updatedCount % 10 === 0) {
+        Utilities.sleep(1000);
+      }
+    }
+    
+    logInfo(`Backfill complete: Updated ${updatedCount} source email links`);
+    return updatedCount;
+    
+  } catch (error) {
+    logError("Failed to backfill source email links", error);
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "ERROR: Backfill Source Email Links Failed",
+        body: `An error occurred while backfilling source email links:\n\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send error notification", emailError);
+    }
+    return 0;
   }
 }
 
@@ -347,12 +444,16 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
 
   // 🧾 Network Summary
   const crossRef = networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues(); // [ [id, name], ... ]
+  const removedNetworkIds = getRemovedNetworks(sheet); // Get list of removed network IDs
   let summaryTableRows = [];
   let noDataNetworks = [];
 
   crossRef.forEach(([id, name]) => {
     // Skip empty rows
     if (!id || String(id).trim() === "") return;
+    
+    // Skip removed networks
+    if (removedNetworkIds.has(String(id).trim())) return;
     
     const rowCount = validNetworks.get(String(id));
     // Show all networks in the Networks sheet, with 0 if no data
@@ -482,11 +583,15 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
 
     // 🧾 Network Summary
     const crossRef = networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues();
+    const removedNetworkIds = getRemovedNetworks(sheet); // Get list of removed network IDs
     let summaryTableRows = [];
     let noDataNetworks = [];
 
     crossRef.forEach(([id, name]) => {
       if (!id || String(id).trim() === "") return;
+      
+      // Skip removed networks
+      if (removedNetworkIds.has(String(id).trim())) return;
       
       const rowCount = validNetworks.get(String(id));
       summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
