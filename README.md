@@ -77,17 +77,51 @@ From the Google Sheets menu:
 ### Scheduled Execution
 Set up a time-driven trigger in Apps Script to run `importDCMReports()` daily.
 
+### Adding Networks to Monitoring
+
+To add a new network report for monitoring:
+
+1. **Step 1:** Place this exact string into the AI helper in DCM Reports:
+   ```
+   Advertiser ID, Advertiser, Campaign ID, campaign, Placement ID, Placement, impressions, clicks, Yesterday
+   ```
+
+2. **Step 2:** Set the report subject/label to exactly:
+   ```
+   BKCVI click and impression
+   ```
+   *(This auto-applies the DCM Reports Gmail label)*
+
+3. **Step 3:** Set schedule with end date of **Jan 1, 2030**
+
+4. **Step 4:** Ensure you CC this email exactly:
+   ```
+   platformsolutionsadopshorizon@gmail.com
+   ```
+
+Once the report is configured, it will be automatically imported daily and flagged placements will appear in the next day's CVI report.
+
 ### Removing Networks from Monitoring
+
 Any email recipient can remove a network by **replying to the daily DCM CVI Report email** with:
 ```
-REMOVE NETWORK 12345
+REMOVE NETWORK [ID]
 ```
-(Replace 12345 with the actual Network ID)
 
-- Multiple networks can be removed in one email
+**Example:** To remove multiple networks in one email:
+```
+REMOVE NETWORK 12345
+REMOVE NETWORK 67890
+REMOVE NETWORK 99999
+```
+
+**Details:**
+- Replace `[ID]` with the actual Network ID from the report
+- Multiple networks can be removed in a single email
 - Removal takes effect the next day before data processing
-- Admin receives confirmation email for all removals
-- Removed networks are archived in the "Removed Networks" sheet
+- Admin receives confirmation email listing all removals
+- Removed networks are archived in the "Removed Networks" sheet for audit purposes
+- Removed networks no longer appear in future CVI reports
 
 ## Workflow
 
