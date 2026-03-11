@@ -42,6 +42,10 @@ function onOpen() {
     .addToUi();
 }
 
+function isValidNetworkId(networkId) {
+  return /^\d+$/.test(String(networkId || "").trim());
+}
+
 /**
  * Extracts network ID from filename (format: NETWORKID_...)
  * @param {string} fileName - The name of the CSV file
@@ -50,8 +54,9 @@ function onOpen() {
 function extractNetworkId(fileName) {
   const match = fileName.match(/^([^_]+)_/);
   const id = match ? String(match[1]).trim() : "Unknown";
-  if (id === "Unknown") {
-    logError(`Could not extract network ID from filename: ${fileName}`);
+  if (id === "Unknown" || !isValidNetworkId(id)) {
+    logError(`Invalid network ID extracted from filename: ${fileName}`);
+    return "Unknown";
   }
   return id;
 }
@@ -355,7 +360,7 @@ function autoAddNewNetworks(ss, allNetworksChecked) {
   
   const newNetworks = [];
   allNetworksChecked.forEach(networkId => {
-    if (!existingNetworks.has(networkId) && networkId !== "Unknown") {
+    if (!existingNetworks.has(networkId) && networkId !== "Unknown" && isValidNetworkId(networkId)) {
       newNetworks.push([networkId, "TO BE ADDED SOON"]);
     }
   });
@@ -451,6 +456,9 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   crossRef.forEach(([id, name]) => {
     // Skip empty rows
     if (!id || String(id).trim() === "") return;
+
+    // Skip non-numeric/invalid network IDs
+    if (!isValidNetworkId(id)) return;
     
     // Skip removed networks
     if (removedNetworkIds.has(String(id).trim())) return;
@@ -589,6 +597,9 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
 
     crossRef.forEach(([id, name]) => {
       if (!id || String(id).trim() === "") return;
+
+      // Skip non-numeric/invalid network IDs
+      if (!isValidNetworkId(id)) return;
       
       // Skip removed networks
       if (removedNetworkIds.has(String(id).trim())) return;
@@ -729,6 +740,12 @@ function importDCMReports() {
       attachments.forEach(attachment => {
         const name = attachment.getName();
         const networkId = extractNetworkId(name);
+
+        // Skip invalid/non-numeric network IDs
+        if (!isValidNetworkId(networkId)) {
+          Logger.log(`Skipping invalid network ID from attachment: ${name}`);
+          return;
+        }
         
         // Skip if network is in the removed list
         if (removedNetworks.has(networkId)) {
@@ -749,6 +766,12 @@ function importDCMReports() {
           const unzippedFiles = Utilities.unzip(attachment.copyBlob());
           unzippedFiles.forEach(file => {
             const nestedId = extractNetworkId(file.getName());
+
+            // Skip invalid/non-numeric network IDs
+            if (!isValidNetworkId(nestedId)) {
+              Logger.log(`Skipping invalid network ID from zip file: ${file.getName()}`);
+              return;
+            }
             
             // Skip if network is in the removed list
             if (removedNetworks.has(nestedId)) {
