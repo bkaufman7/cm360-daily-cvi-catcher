@@ -498,7 +498,9 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   body += "</ol>";
   body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
-    const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
+    const csvHeaders = ["Network ID", "Advertiser ID", "Advertiser Name", "Campaign ID", "Campaign Name", "Placement ID", "Placement Name", "Impressions", "Clicks", "Difference %"];
+    const csvContent = [csvHeaders, ...outputData].map(row => row.join(",")).join("\n");
+    const csvBlob = Utilities.newBlob(csvContent, "text/csv", `DCM_CVI_Report_${formattedDate}.csv`);
     emails.forEach(email => {
       MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
     });
@@ -638,7 +640,9 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
     body += "</ol>";
     body += "<p>Brought to you by the Platform Solutions Automation. (Made by: BK).</p>";
 
-    const csvBlob = Utilities.newBlob(outputData.map(row => row.join(",")).join("\n"), "text/csv", `DCM_3K_CVI_Report_${formattedDate}.csv`);
+    const csvHeaders = ["Network ID", "Advertiser ID", "Advertiser Name", "Campaign ID", "Campaign Name", "Placement ID", "Placement Name", "Impressions", "Clicks", "Difference %"];
+    const csvContent = [csvHeaders, ...outputData].map(row => row.join(",")).join("\n");
+    const csvBlob = Utilities.newBlob(csvContent, "text/csv", `DCM_3K_CVI_Report_${formattedDate}.csv`);
     emails.forEach(email => {
       MailApp.sendEmail({ to: email, subject: subject, htmlBody: body, attachments: outputData.length > 0 ? [csvBlob] : [] });
     });
