@@ -4,18 +4,33 @@ const CONFIG = {
   CLICK_THRESHOLD: 12500, // $100 in click fees at $0.008 CPC ($100 / $0.008 = 12,500 clicks)
   CLICK_THRESHOLD_3K: 3000, // 3K threshold for Jenny's report
   ADMIN_EMAIL: "bkaufman@horizonmedia.com",
+  ADVERTISER_IGNORE_SOURCE: {
+    SPREADSHEET_ID: "1BJpCPZaTEIa852vF5DiZvL9OpScKy0Awe-xXRikph2o",
+    TAB_NAME: "Advertisers To Ignore",
+    NAME_COLUMN: 1 // Column A in source
+  },
+  NETWORK_SOURCE: {
+    SPREADSHEET_ID: "1BJpCPZaTEIa852vF5DiZvL9OpScKy0Awe-xXRikph2o",
+    TAB_NAME: "Networks",
+    START_COLUMN: 1,
+    COLUMN_COUNT: 2,
+    LAST_SYNC_CELL: "D1",
+    SOURCE_LINK_CELL: "E1"
+  },
   SHEETS: {
     DATA: "Data",
     OUTPUT: "Output",
     OUTPUT_3K: "3K Output",
     NETWORKS: "Networks",
     EMAIL_LIST: "Email List",
-    REMOVED_NETWORKS: "Removed Networks"
+    REMOVED_NETWORKS: "Removed Networks",
+    ADVERTISERS_TO_IGNORE: "Advertisers to Ignore"
   },
   DATE_FORMAT: {
     EMAIL: "MM.dd.yy",
     SEARCH: "yyyy/MM/dd",
-    AUDIT: "MM/dd/yyyy HH:mm:ss"
+    AUDIT: "MM/dd/yyyy HH:mm:ss",
+    SYNC: "yyyy-MM-dd"
   }
 };
 
@@ -29,10 +44,15 @@ function logError(message, error) {
   if (error) Logger.log(error);
 }
 
+function getTodaySyncKey() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SYNC);
+}
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu("DCM Reports")
     .addItem("Import DCM Reports", "importDCMReports")
+    .addItem("Sync Network List", "syncSourceData")
     .addItem("Send Main Report (12.5K)", "sendMainReport")
     .addItem("Send 3K Report", "send3KReport")
     .addItem("Send All Reports", "sendAllReports")
@@ -44,6 +64,10 @@ function onOpen() {
 
 function isValidNetworkId(networkId) {
   return /^\d+$/.test(String(networkId || "").trim());
+}
+
+function isNetworkReportFileName(fileName) {
+  return /^\d+_/.test(String(fileName || "").trim());
 }
 
 /**
@@ -69,13 +93,37 @@ function extractNetworkId(fileName) {
  * @returns {Array<Array>} Parsed rows with network ID prepended
  */
 function processCSV(fileContent, networkId) {
-  let lines = fileContent.split("\n").map(line => line.trim()).filter(line => line);
-  let startIndex = lines.findIndex(line => line.startsWith("Advertiser ID"));
-  if (startIndex === -1) return [];
+  const allLines = fileContent.split("\n");
 
-  let csvData = Utilities.parseCsv(lines.slice(startIndex).join("\n"));
-  csvData.shift(); // Remove headers
-  return csvData.map(row => [networkId, ...row]);
+  // Find the data header row after DCM metadata rows
+  let headerIndex = -1;
+  for (let i = 0; i < allLines.length; i++) {
+    const trimmedLine = allLines[i].trim();
+    if (trimmedLine.toLowerCase().startsWith("advertiser id")) {
+      headerIndex = i;
+      break;
+    }
+  }
+
+  if (headerIndex === -1) {
+    logError(`No CSV header found in network ${networkId}`);
+    return [];
+  }
+
+  try {
+    const dataSection = allLines.slice(headerIndex).join("\n");
+    let csvData = Utilities.parseCsv(dataSection);
+
+    if (csvData.length > 0) {
+      csvData.shift(); // Remove header row
+    }
+
+    csvData = csvData.filter(row => row && row.length >= 8 && row[0]);
+    return csvData.map(row => [networkId, ...row]);
+  } catch (error) {
+    logError(`Failed to parse CSV for network ${networkId}`, error);
+    return [];
+  }
 }
 
 function getRemovedNetworks(ss) {
@@ -90,6 +138,245 @@ function getRemovedNetworks(ss) {
   }
   
   return removedNetworks;
+}
+
+function normalizeAdvertiserName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function getContiguousSourceValues(sheet, startColumn, columnCount) {
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow <= 0) {
+    return [];
+  }
+
+  const rows = sheet.getRange(1, startColumn, lastRow, columnCount).getValues();
+  const contiguousRows = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const isBlankRow = row.every(cell => String(cell || "").trim() === "");
+
+    if (isBlankRow) {
+      break;
+    }
+
+    contiguousRows.push(row);
+  }
+
+  return contiguousRows;
+}
+
+function ensureAdvertisersToIgnoreSheet(ss) {
+  let ignoreSheet = ss.getSheetByName(CONFIG.SHEETS.ADVERTISERS_TO_IGNORE);
+
+  if (!ignoreSheet) {
+    ignoreSheet = ss.insertSheet(CONFIG.SHEETS.ADVERTISERS_TO_IGNORE);
+    const headers = ["Advertiser Name", "Last Synced", "Source"];
+    ignoreSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    ignoreSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+    logInfo(`Created ${CONFIG.SHEETS.ADVERTISERS_TO_IGNORE} sheet`);
+  }
+
+  return ignoreSheet;
+}
+
+function getIgnoredAdvertisers(ss) {
+  const ignoreSheet = ensureAdvertisersToIgnoreSheet(ss);
+  const ignoredAdvertisers = new Set();
+
+  if (ignoreSheet.getLastRow() > 1) {
+    const names = ignoreSheet.getRange(2, 1, ignoreSheet.getLastRow() - 1, 1).getValues();
+    names.forEach(row => {
+      const normalized = normalizeAdvertiserName(row[0]);
+      if (normalized) {
+        ignoredAdvertisers.add(normalized);
+      }
+    });
+  }
+
+  return ignoredAdvertisers;
+}
+
+function refreshAdvertiserIgnoreListIfNeeded(ss, todayKey) {
+  const ignoreSheet = ensureAdvertisersToIgnoreSheet(ss);
+  const syncKey = todayKey || getTodaySyncKey();
+  const lastSynced = String(ignoreSheet.getRange(1, 2).getValue() || "").trim();
+
+  if (lastSynced === syncKey) {
+    logInfo("Advertiser ignore list already synced today");
+    return;
+  }
+
+  try {
+    const sourceSS = SpreadsheetApp.openById(CONFIG.ADVERTISER_IGNORE_SOURCE.SPREADSHEET_ID);
+    const sourceSheet = sourceSS.getSheetByName(CONFIG.ADVERTISER_IGNORE_SOURCE.TAB_NAME);
+
+    if (!sourceSheet) {
+      throw new Error(`Source tab not found: ${CONFIG.ADVERTISER_IGNORE_SOURCE.TAB_NAME}`);
+    }
+
+    let sourceNames = [];
+
+    const sourceRows = getContiguousSourceValues(
+      sourceSheet,
+      CONFIG.ADVERTISER_IGNORE_SOURCE.NAME_COLUMN,
+      1
+    );
+
+    if (sourceRows.length > 0) {
+      sourceNames = sourceRows
+        .map(row => String(row[0] || "").trim())
+        .filter(Boolean)
+        .filter(name => {
+          const normalized = normalizeAdvertiserName(name);
+          return normalized !== "advertiser" && normalized !== "advertiser name";
+        });
+    }
+
+    const uniqueNames = [...new Set(sourceNames)];
+
+    if (ignoreSheet.getLastRow() > 1) {
+      ignoreSheet.deleteRows(2, ignoreSheet.getLastRow() - 1);
+    }
+
+    if (uniqueNames.length > 0) {
+      const rows = uniqueNames.map(name => [name]);
+      ignoreSheet.getRange(2, 1, rows.length, 1).setValues(rows);
+    }
+
+    ignoreSheet.getRange(1, 2).setValue(syncKey);
+    ignoreSheet.getRange(1, 3).setValue(
+      `https://docs.google.com/spreadsheets/d/${CONFIG.ADVERTISER_IGNORE_SOURCE.SPREADSHEET_ID}`
+    );
+
+    logInfo(`Synced ${uniqueNames.length} advertiser names into ignore list cache`);
+  } catch (error) {
+    logError("Failed to sync advertiser ignore list; using cached list", error);
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "WARNING: Advertiser Ignore Sync Failed",
+        body: `The advertiser ignore list could not be refreshed today. The script continued using cached values in '${CONFIG.SHEETS.ADVERTISERS_TO_IGNORE}'.\n\nError:\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send advertiser ignore sync warning", emailError);
+    }
+  }
+}
+
+function ensureNetworksSheet(ss) {
+  let networksSheet = ss.getSheetByName(CONFIG.SHEETS.NETWORKS);
+
+  if (!networksSheet) {
+    networksSheet = ss.insertSheet(CONFIG.SHEETS.NETWORKS);
+    const headers = ["Network ID", "Network Name"];
+    networksSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    networksSheet.getRange(1, 1, 1, headers.length).setFontWeight("bold");
+    logInfo(`Created ${CONFIG.SHEETS.NETWORKS} sheet`);
+  }
+
+  return networksSheet;
+}
+
+function refreshNetworksSheetIfNeeded(ss, todayKey) {
+  const networksSheet = ensureNetworksSheet(ss);
+  const syncKey = todayKey || getTodaySyncKey();
+  const lastSynced = String(networksSheet.getRange(CONFIG.NETWORK_SOURCE.LAST_SYNC_CELL).getValue() || "").trim();
+
+  if (lastSynced === syncKey) {
+    logInfo("Networks sheet already synced today");
+    return;
+  }
+
+  try {
+    const sourceSS = SpreadsheetApp.openById(CONFIG.NETWORK_SOURCE.SPREADSHEET_ID);
+    const sourceSheet = sourceSS.getSheetByName(CONFIG.NETWORK_SOURCE.TAB_NAME);
+
+    if (!sourceSheet) {
+      throw new Error(`Source tab not found: ${CONFIG.NETWORK_SOURCE.TAB_NAME}`);
+    }
+
+    const sourceRows = getContiguousSourceValues(
+      sourceSheet,
+      CONFIG.NETWORK_SOURCE.START_COLUMN,
+      CONFIG.NETWORK_SOURCE.COLUMN_COUNT
+    );
+
+    if (networksSheet.getLastRow() > 0) {
+      networksSheet.getRange(1, 1, networksSheet.getMaxRows(), CONFIG.NETWORK_SOURCE.COLUMN_COUNT).clearContent();
+    }
+
+    if (sourceRows.length > 0) {
+      networksSheet.getRange(1, 1, sourceRows.length, CONFIG.NETWORK_SOURCE.COLUMN_COUNT).setValues(sourceRows);
+      networksSheet.getRange(1, 1, 1, CONFIG.NETWORK_SOURCE.COLUMN_COUNT).setFontWeight("bold");
+    }
+
+    networksSheet.getRange(CONFIG.NETWORK_SOURCE.LAST_SYNC_CELL).setValue(syncKey);
+    networksSheet.getRange(CONFIG.NETWORK_SOURCE.SOURCE_LINK_CELL).setValue(
+      `https://docs.google.com/spreadsheets/d/${CONFIG.NETWORK_SOURCE.SPREADSHEET_ID}`
+    );
+
+    logInfo(`Synced ${sourceRows.length} rows into ${CONFIG.SHEETS.NETWORKS}`);
+  } catch (error) {
+    logError("Failed to sync Networks sheet; using cached values", error);
+    try {
+      MailApp.sendEmail({
+        to: CONFIG.ADMIN_EMAIL,
+        subject: "WARNING: Networks Sheet Sync Failed",
+        body: `The Networks sheet could not be refreshed today. The script continued using cached values in '${CONFIG.SHEETS.NETWORKS}'.\n\nError:\n${error}`
+      });
+    } catch (emailError) {
+      logError("Failed to send Networks sync warning", emailError);
+    }
+  }
+}
+
+function syncSourceData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const todayKey = getTodaySyncKey();
+  refreshNetworksSheetIfNeeded(ss, todayKey);
+  refreshAdvertiserIgnoreListIfNeeded(ss, todayKey);
+}
+
+function syncNetworksFromSource() {
+  syncSourceData();
+}
+
+function getExpectedNetworkRows(networksSheet, removedNetworkIds) {
+  if (!networksSheet || networksSheet.getLastRow() < 2) {
+    return [];
+  }
+
+  return networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues().filter(([id]) => {
+    if (!id || !isValidNetworkId(id)) {
+      return false;
+    }
+
+    return !removedNetworkIds.has(String(id).trim());
+  });
+}
+
+function getMissingNetworkReports(expectedNetworkRows, allNetworksChecked) {
+  if (!expectedNetworkRows || expectedNetworkRows.length === 0) {
+    return [];
+  }
+
+  return expectedNetworkRows
+    .filter(([id]) => !allNetworksChecked.has(String(id).trim()))
+    .map(([id, name]) => `${id} - ${name}`);
+}
+
+function filterIgnoredAdvertisers(rows, ignoredAdvertisers) {
+  if (!ignoredAdvertisers || ignoredAdvertisers.size === 0) {
+    return rows;
+  }
+
+  return rows.filter(row => {
+    const advertiserName = normalizeAdvertiserName(row[2]);
+    return advertiserName && !ignoredAdvertisers.has(advertiserName);
+  });
 }
 
 /**
@@ -136,7 +423,7 @@ function processNetworkRemovalRequests() {
     const formattedYesterday = Utilities.formatDate(yesterday, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
     
     // Search for replies to both Main and 3K CVI Report emails
-    const threads = GmailApp.search(`(subject:"DCM CVI Report" OR subject:"DCM 3K CVI Report") after:${formattedYesterday}`);
+    const threads = GmailApp.search(`in:inbox (subject:"DCM CVI Report" OR subject:"DCM 3K CVI Report") after:${formattedYesterday}`);
     const removalCommands = [];
     const regex = /REMOVE\s+NETWORK\s+(\d+)/gi;
     const exampleNetworkIds = new Set(["12345", "67890", "99999"]); // Skip example IDs from email instructions
@@ -152,10 +439,7 @@ function processNetworkRemovalRequests() {
         const networkId = match[1];
         
         // Skip example network IDs used in email instructions
-        if (exampleNetworkIds.has(networkId)) {
-          Logger.log(`Skipping example network ID: ${networkId}`);
-          continue;
-        }
+        if (exampleNetworkIds.has(networkId)) continue;
         
         removalCommands.push({
           networkId: networkId,
@@ -374,6 +658,72 @@ function autoAddNewNetworks(ss, allNetworksChecked) {
   }
 }
 
+/**
+ * Builds a set of network IDs that had at least one report attachment today.
+ * Used to distinguish "no report" from "report present with zero placements" in summaries.
+ * @returns {Set<string>} Set of network IDs found in today's labeled Gmail reports
+ */
+function getNetworksCheckedToday() {
+  const checkedNetworks = new Set();
+
+  try {
+    const today = new Date();
+    const formattedToday = Utilities.formatDate(today, Session.getScriptTimeZone(), CONFIG.DATE_FORMAT.SEARCH);
+    const threads = GmailApp.search(`label:${CONFIG.GMAIL_LABEL} after:${formattedToday}`);
+
+    threads.forEach(thread => {
+      thread.getMessages().forEach(message => {
+        message.getAttachments().forEach(attachment => {
+          const attachmentName = attachment.getName();
+
+          // Ignore outbound report CSVs and other non-network attachments
+          if (!isNetworkReportFileName(attachmentName)) {
+            return;
+          }
+
+          const networkId = extractNetworkId(attachmentName);
+
+          if (isValidNetworkId(networkId)) {
+            checkedNetworks.add(String(networkId));
+          }
+
+          if (attachment.getContentType() === "application/zip") {
+            const unzippedFiles = Utilities.unzip(attachment.copyBlob());
+            unzippedFiles.forEach(file => {
+              if (!isNetworkReportFileName(file.getName())) {
+                return;
+              }
+
+              const nestedId = extractNetworkId(file.getName());
+              if (isValidNetworkId(nestedId)) {
+                checkedNetworks.add(String(nestedId));
+              }
+            });
+          }
+        });
+      });
+    });
+  } catch (error) {
+    logError("Failed to build today's checked network set", error);
+  }
+
+  return checkedNetworks;
+}
+
+/**
+ * Returns display text for summary count, clarifying why a network is at zero.
+ * @param {number|undefined} rowCount - Imported placement count for the network
+ * @param {boolean} reportPresent - Whether a report file was found for the network today
+ * @returns {string} Summary cell text
+ */
+function getPlacementStatusText(rowCount, reportPresent) {
+  if (rowCount && rowCount > 0) {
+    return String(rowCount);
+  }
+
+  return reportPresent ? "0 - report present" : "0 - no report present today";
+}
+
 
 
 /**
@@ -412,7 +762,7 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
     }
     
     if (!allNetworksChecked) {
-      allNetworksChecked = new Set(validNetworks.keys());
+      allNetworksChecked = getNetworksCheckedToday();
     }
 
     const emails = emailSheet.getRange("A2:A").getValues().flat().filter(email => email);
@@ -448,26 +798,19 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   }
 
   // 🧾 Network Summary
-  const crossRef = networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues(); // [ [id, name], ... ]
   const removedNetworkIds = getRemovedNetworks(sheet); // Get list of removed network IDs
+  const crossRef = getExpectedNetworkRows(networksSheet, removedNetworkIds);
+  const missingNetworkReports = getMissingNetworkReports(crossRef, allNetworksChecked);
   let summaryTableRows = [];
   let noDataNetworks = [];
 
   crossRef.forEach(([id, name]) => {
-    // Skip empty rows
-    if (!id || String(id).trim() === "") return;
-
-    // Skip non-numeric/invalid network IDs
-    if (!isValidNetworkId(id)) return;
+    const networkId = String(id);
+    const rowCount = validNetworks.get(networkId);
+    const placementStatus = getPlacementStatusText(rowCount, allNetworksChecked.has(networkId));
+    summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${placementStatus}</td></tr>`);
     
-    // Skip removed networks
-    if (removedNetworkIds.has(String(id).trim())) return;
-    
-    const rowCount = validNetworks.get(String(id));
-    // Show all networks in the Networks sheet, with 0 if no data
-    summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
-    
-    if (allNetworksChecked.has(String(id)) && !validNetworks.has(String(id))) {
+    if (allNetworksChecked.has(networkId) && !validNetworks.has(networkId)) {
       noDataNetworks.push(`${id} - ${name}`);
     }
   });
@@ -481,6 +824,11 @@ function sendMainReport(outputData, validNetworks, allNetworksChecked) {
   if (noDataNetworks.length > 0) {
     body += `<p>⚠️ The following networks had files received but <strong>no valid CSV data</strong> was found:</p>`;
     body += `<ul>${noDataNetworks.map(n => `<li>${n}</li>`).join("")}</ul>`;
+  }
+
+  if (missingNetworkReports.length > 0) {
+    body += `<p>⚠️ No report email was found today for the following source-of-truth networks/advertisers:</p>`;
+    body += `<ul>${missingNetworkReports.map(n => `<li>${n}</li>`).join("")}</ul>`;
   }
 
   body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body.<br/>";
@@ -556,7 +904,7 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
     }
     
     if (!allNetworksChecked) {
-      allNetworksChecked = new Set(validNetworks.keys());
+      allNetworksChecked = getNetworksCheckedToday();
     }
 
     const emails = emailSheet.getRange("D2:D").getValues().flat().filter(email => email);
@@ -592,24 +940,19 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
     }
 
     // 🧾 Network Summary
-    const crossRef = networksSheet.getRange(2, 1, networksSheet.getLastRow() - 1, 2).getValues();
     const removedNetworkIds = getRemovedNetworks(sheet); // Get list of removed network IDs
+    const crossRef = getExpectedNetworkRows(networksSheet, removedNetworkIds);
+    const missingNetworkReports = getMissingNetworkReports(crossRef, allNetworksChecked);
     let summaryTableRows = [];
     let noDataNetworks = [];
 
     crossRef.forEach(([id, name]) => {
-      if (!id || String(id).trim() === "") return;
-
-      // Skip non-numeric/invalid network IDs
-      if (!isValidNetworkId(id)) return;
+      const networkId = String(id);
+      const rowCount = validNetworks.get(networkId);
+      const placementStatus = getPlacementStatusText(rowCount, allNetworksChecked.has(networkId));
+      summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${placementStatus}</td></tr>`);
       
-      // Skip removed networks
-      if (removedNetworkIds.has(String(id).trim())) return;
-      
-      const rowCount = validNetworks.get(String(id));
-      summaryTableRows.push(`<tr><td>${id}</td><td>${name}</td><td>${rowCount ?? 0}</td></tr>`);
-      
-      if (allNetworksChecked.has(String(id)) && !validNetworks.has(String(id))) {
+      if (allNetworksChecked.has(networkId) && !validNetworks.has(networkId)) {
         noDataNetworks.push(`${id} - ${name}`);
       }
     });
@@ -623,6 +966,11 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
     if (noDataNetworks.length > 0) {
       body += `<p>⚠️ The following networks had files received but <strong>no valid CSV data</strong> was found:</p>`;
       body += `<ul>${noDataNetworks.map(n => `<li>${n}</li>`).join("")}</ul>`;
+    }
+
+    if (missingNetworkReports.length > 0) {
+      body += `<p>⚠️ No report email was found today for the following source-of-truth networks/advertisers:</p>`;
+      body += `<ul>${missingNetworkReports.map(n => `<li>${n}</li>`).join("")}</ul>`;
     }
 
     body += "<p><small>📧 <strong>To remove a network from monitoring:</strong> Reply to this email with \"REMOVE NETWORK [ID]\" in the body.<br/>";
@@ -666,7 +1014,8 @@ function send3KReport(outputData, validNetworks, allNetworksChecked) {
  */
 function sendAllReports() {
   try {
-    logInfo("Sending all reports");
+    logInfo("Importing fresh data and sending all reports");
+    importDCMReports();
     sendMainReport();
     send3KReport();
     logInfo("All reports sent successfully");
@@ -690,13 +1039,17 @@ function importDCMReports() {
   try {
     logInfo("Starting DCM report import");
     const sheet = SpreadsheetApp.getActiveSpreadsheet();
+
+    syncSourceData();
     
     // Process network removal requests FIRST (before importing data)
     processNetworkRemovalRequests();
     
     // Get list of removed networks to filter out
     const removedNetworks = getRemovedNetworks(sheet);
-    
+
+    const ignoredAdvertisers = getIgnoredAdvertisers(sheet);
+
     const dataSheet = sheet.getSheetByName(CONFIG.SHEETS.DATA) || sheet.insertSheet(CONFIG.SHEETS.DATA);
     const outputSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT) || sheet.insertSheet(CONFIG.SHEETS.OUTPUT);
     const output3KSheet = sheet.getSheetByName(CONFIG.SHEETS.OUTPUT_3K) || sheet.insertSheet(CONFIG.SHEETS.OUTPUT_3K);
@@ -732,8 +1085,10 @@ function importDCMReports() {
     let extractedData = [];
     let allNetworksChecked = new Set();
     let validNetworks = new Map(); // Map<networkId, numberOfPlacements>
+    let ignoredNonNetworkAttachments = 0;
 
     if (threads.length === 0) {
+      logInfo(`Ignored non-network attachments: ${ignoredNonNetworkAttachments}`);
       logInfo("No emails found with today's reports");
       return;
     }
@@ -743,6 +1098,13 @@ function importDCMReports() {
       const attachments = message.getAttachments();
       attachments.forEach(attachment => {
         const name = attachment.getName();
+
+        // Ignore outbound report CSVs and any other non-network attachments
+        if (!isNetworkReportFileName(name)) {
+          ignoredNonNetworkAttachments++;
+          return;
+        }
+
         const networkId = extractNetworkId(name);
 
         // Skip invalid/non-numeric network IDs
@@ -761,7 +1123,10 @@ function importDCMReports() {
 
         if (attachment.getContentType() === "text/csv" || name.endsWith(".csv")) {
           const rawRows = processCSV(attachment.getDataAsString(), networkId);
-          const filteredRows = rawRows.filter(r => r[1] !== "Grand Total:");
+          const filteredRows = filterIgnoredAdvertisers(
+            rawRows.filter(r => r[1] !== "Grand Total:"),
+            ignoredAdvertisers
+          );
           validNetworks.set(networkId, (validNetworks.get(networkId) || 0) + filteredRows.length);
           if (filteredRows.length > 0) {
             extractedData = extractedData.concat(filteredRows);
@@ -769,6 +1134,11 @@ function importDCMReports() {
         } else if (attachment.getContentType() === "application/zip") {
           const unzippedFiles = Utilities.unzip(attachment.copyBlob());
           unzippedFiles.forEach(file => {
+            if (!isNetworkReportFileName(file.getName())) {
+              ignoredNonNetworkAttachments++;
+              return;
+            }
+
             const nestedId = extractNetworkId(file.getName());
 
             // Skip invalid/non-numeric network IDs
@@ -786,7 +1156,10 @@ function importDCMReports() {
             allNetworksChecked.add(nestedId);
             if (file.getContentType() === "text/csv" || file.getName().endsWith(".csv")) {
               const rawRows = processCSV(file.getDataAsString(), nestedId);
-              const filteredRows = rawRows.filter(r => r[1] !== "Grand Total:");
+              const filteredRows = filterIgnoredAdvertisers(
+                rawRows.filter(r => r[1] !== "Grand Total:"),
+                ignoredAdvertisers
+              );
               validNetworks.set(nestedId, (validNetworks.get(nestedId) || 0) + filteredRows.length);
               if (filteredRows.length > 0) {
                 extractedData = extractedData.concat(filteredRows);
@@ -841,6 +1214,7 @@ function importDCMReports() {
       output3KSheet.getRange(2, 1, output3KData.length, outputHeaders.length).setValues(output3KData);
     }
 
+    logInfo(`Ignored non-network attachments: ${ignoredNonNetworkAttachments}`);
     logInfo(`Import completed: ${extractedData.length} total rows, ${mainOutputData.length} main placements, ${output3KData.length} 3K placements`);
   } catch (error) {
     logError("Fatal error in importDCMReports", error);
